@@ -62,6 +62,7 @@ uses
   {$ENDIF MSWINDOWS}
   System.Types,
   System.SysUtils, System.Classes, System.Contnrs,
+  System.SyncObjs,
   {$IFDEF ZLIB_RTL}
   System.ZLib,
   {$ENDIF ZLIB_RTL}
@@ -71,6 +72,7 @@ uses
   {$ENDIF MSWINDOWS}
   Types,
   SysUtils, Classes, Contnrs,
+  SyncObjs,
   {$IFDEF ZLIB_RTL}
   ZLib,
   {$ENDIF ZLIB_RTL}
@@ -599,9 +601,38 @@ procedure UnBZip2Stream(SourceStream, DestinationStream: TStream;
 // archive ancestor classes
 {$IFDEF MSWINDOWS}
 type
-  TJclSafecallInterfacedObject = class(TInterfacedObject)
+
+  IJclErrorBox = interface
+  ['{890F6CF7-9461-49E4-B849-1161EDE97514}']
+    procedure AddError(AErrMsg: string);
+    function GetAllErrors(): string;
+    procedure Reset();
+    procedure ModifyExceptionMsg(AExceptionToModify: Exception; AAddDetails: Boolean = True);
+  end;
+
+  TIJclErrorBox = class(TInterfacedObject, IJclErrorBox)
+  private
+    FErrors: TStringList;
+    FCriticalSection: TCriticalSection;
+    function GetCriticalSection(): TCriticalSection;
+  protected //public via interface
+    procedure AddError(AErrMsg: string);
+    function GetAllErrors(): string;
+    procedure Reset();
+    procedure ModifyExceptionMsg(AExceptionToModify: Exception; AAddDetails: Boolean = True);
   public
+    destructor Destroy; override;
+  end;
+
+
+  TJclSafecallInterfacedObject = class(TInterfacedObject, IJclErrorBox)
+  private
+    FErrorBox: IJclErrorBox;              //collecting errors of this and depending objects
+    function GetErrorBox: IJclErrorBox;
+  public
+    constructor Create(OptionalErrorBox: IJclErrorBox = nil);
     function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
+    property ErrorBox: IJclErrorBox read GetErrorBox implements IJclErrorBox;
   end;
 
   TJclCompressionVolumeEvent = procedure(Sender: TObject; Index: Integer;
@@ -1221,6 +1252,7 @@ type
   TJclSevenzipCompressArchive = class(TJclCompressArchive, IInterface)
   private
     FOutArchive: IOutArchive;
+    FShowErrorDetails: Boolean;
   protected
     function GetItemClass: TJclCompressionItemClass; override;
     function GetOutArchive: IOutArchive;
@@ -1230,6 +1262,7 @@ type
     destructor Destroy; override;
     procedure Compress; override;
     property OutArchive: IOutArchive read GetOutArchive;
+    property ShowErrorDetails: Boolean read FShowErrorDetails write FShowErrorDetails;
   end;
 
   // file formats
@@ -1449,6 +1482,7 @@ type
     FInArchive: IInArchive;
     FInArchiveGetStream: IInArchiveGetStream;
     FOpened: Boolean;
+    FShowErrorDetails: Boolean;
   protected
     procedure OpenArchive;
     function GetInArchive: IInArchive;
@@ -1466,6 +1500,7 @@ type
       AAutoCreateSubDir: Boolean = True); override;
     property InArchive: IInArchive read GetInArchive;
     property InArchiveGetStream: IInArchiveGetStream read GetInArchiveGetStream;
+    property ShowErrorDetails: Boolean read FShowErrorDetails write FShowErrorDetails;
   end;
 
   // file formats
@@ -1913,6 +1948,7 @@ type
     FInArchive: IInArchive;
     FOutArchive: IOutArchive;
     FOpened: Boolean;
+    FShowErrorDetails: Boolean;
   protected
     procedure OpenArchive;
     function GetInArchive: IInArchive;
@@ -1932,6 +1968,7 @@ type
     procedure RemoveItem(const PackedName: WideString); override;
     property InArchive: IInArchive read GetInArchive;
     property OutArchive: IOutArchive read GetOutArchive;
+    property ShowErrorDetails: Boolean read FShowErrorDetails write FShowErrorDetails;
   end;
 
   TJclZipUpdateArchive = class(TJclSevenzipUpdateArchive, IJclArchiveCompressionLevel, IJclArchiveCompressionMethod,
@@ -2125,7 +2162,7 @@ type
 // internal sevenzip stuff, do not use it directly
 type
   TJclSevenzipOutStream = class(TJclSafecallInterfacedObject,
-    ISequentialOutStream, IOutStream, IUnknown)
+    ISequentialOutStream, IOutStream, IJclErrorBox, IUnknown)
   private
     FArchive: TJclCompressionArchive;
     FItemIndex: Integer;
@@ -2136,8 +2173,10 @@ type
     procedure NeedStream;
     procedure ReleaseStream;
   public
-    constructor Create(AArchive: TJclCompressionArchive; AItemIndex: Integer); overload;
-    constructor Create(AStream: TStream; AOwnsStream: Boolean; ATruncateOnRelease: Boolean); overload;
+    constructor Create(AArchive: TJclCompressionArchive; AItemIndex: Integer;
+      AErrorBox: IJclErrorBox = nil); overload;
+    constructor Create(AStream: TStream; AOwnsStream: Boolean; ATruncateOnRelease: Boolean;
+      AErrorBox: IJclErrorBox = nil); overload;
     destructor Destroy; override;
     // ISequentialOutStream
     procedure Write(Data: Pointer; Size: Cardinal; ProcessedSize: PCardinal); safecall;
@@ -2159,7 +2198,7 @@ type
   end;
 
   TJclSevenzipInStream = class(TJclSafecallInterfacedObject, ISequentialInStream,
-    IInStream, IStreamGetSize, IUnknown)
+    IInStream, IStreamGetSize, IJclErrorBox, IUnknown)
   private
     FArchive: TJclCompressionArchive;
     FItemIndex: Integer;
@@ -2168,8 +2207,9 @@ type
     procedure NeedStream;
     procedure ReleaseStream;
   public
-    constructor Create(AArchive: TJclCompressionArchive; AItemIndex: Integer); overload;
-    constructor Create(AStream: TStream; AOwnsStream: Boolean); overload;
+    constructor Create(AArchive: TJclCompressionArchive; AItemIndex: Integer;
+      AErrorBox: IJclErrorBox = nil); overload;
+    constructor Create(AStream: TStream; AOwnsStream: Boolean; AErrorBox: IJclErrorBox = nil); overload;
     destructor Destroy; override;
     // ISequentialInStream
     procedure Read(Data: Pointer; Size: Cardinal; ProcessedSize: PCardinal); safecall;
@@ -2180,7 +2220,7 @@ type
   end;
 
   TJclSevenzipOpenCallback = class(TJclSafecallInterfacedObject,
-    IArchiveOpenCallback, ICryptoGetTextPassword, IUnknown)
+    IArchiveOpenCallback, ICryptoGetTextPassword, IJclErrorBox, IUnknown)
   private
     FArchive: TJclCompressionArchive;
   public
@@ -2194,7 +2234,7 @@ type
 
   TJclSevenzipExtractCallback = class(TJclSafecallInterfacedObject, IUnknown,
     IProgress, IArchiveExtractCallback, ICryptoGetTextPassword,
-    ICompressProgressInfo)
+    ICompressProgressInfo, IJclErrorBox)
   private
     FArchive: TJclCompressionArchive;
     FLastStream: Cardinal;
@@ -2216,7 +2256,7 @@ type
 
   TJclSevenzipUpdateCallback = class(TJclSafecallInterfacedObject, IUnknown,
     IProgress, IArchiveUpdateCallback, IArchiveUpdateCallback2,
-    ICryptoGetTextPassword2, ICompressProgressInfo)
+    ICryptoGetTextPassword2, ICompressProgressInfo, IJclErrorBox)
   private
     FArchive: TJclCompressionArchive;
     FLastStream: Cardinal;
@@ -3861,11 +3901,81 @@ begin
   end;
 end;
 
+//=== { TIJclErrorBox } ==============================================
+
+procedure TIJclErrorBox.AddError(AErrMsg: string);
+begin
+    GetCriticalSection().Acquire;
+    try
+        if not Assigned(FErrors) then
+          FErrors := TStringList.Create;
+        FErrors.Add(AErrMsg);
+    finally
+        GetCriticalSection().Release;
+    end;
+end;
+
+destructor TIJclErrorBox.Destroy;
+begin
+  FCriticalSection.Free;
+  inherited;
+end;
+
+function TIJclErrorBox.GetAllErrors: string;
+begin
+    GetCriticalSection().Acquire;
+    try
+        if Assigned(FErrors) then
+          Result := FErrors.Text
+        else
+          Result := '';
+    finally
+        GetCriticalSection().Release;
+    end;
+end;
+
+function TIJclErrorBox.GetCriticalSection: TCriticalSection;
+begin
+    if not Assigned(FCriticalSection) then
+      FCriticalSection := TCriticalSection.Create;
+    Result := FCriticalSection;
+end;
+
+/// Collected errors are added to AExceptionToModify.Message if AShowDetails is true, otherwise AErrMsgToModify is not altered
+procedure TIJclErrorBox.ModifyExceptionMsg(AExceptionToModify: Exception; AAddDetails: Boolean = True);
+var
+    Errs: string;
+begin
+    Assert(Assigned(AExceptionToModify));
+    if AAddDetails then
+    begin
+        Errs := GetAllErrors();
+        //Attention: there might be multiple messages that have been collected. For now display them in one
+        //single error message
+        if (Errs <> '') and not AnsiEndsStr(AExceptionToModify.Message, Errs) then
+          AExceptionToModify.Message := AExceptionToModify.Message
+            + sLineBreak + sLineBreak + RsCompressionDetails + sLineBreak + Errs;
+    end;
+end;
+
+procedure TIJclErrorBox.Reset;
+begin
+    GetCriticalSection().Acquire;
+    try
+        FreeAndNil(FErrors);
+    finally
+        GetCriticalSection().Release;
+    end;
+end;
+
 //=== { TJclSafecallInterfacedObject } =======================================
 
 function TJclSafecallInterfacedObject.SafeCallException(ExceptObject: TObject;
   ExceptAddr: Pointer): HResult;
 begin
+  if ExceptObject is Exception then
+    ErrorBox.AddError(Exception(ExceptObject).Message);
+
   {$IFDEF HAS_ENOTIMPLEMENTED}
   if ExceptObject is ENotImplemented then
     Result := E_NOTIMPL
@@ -3891,10 +4001,33 @@ begin
     if AnsiEndsStr(SysErrorMessage(GetLastError), EStreamError(ExceptObject).Message) then
         Result := HResultFromWin32(GetLastError)
     else
-        Result := E_FAIL
+        //original code:
+        //Result := E_FAIL
+        //For a discussion why TFileStream.Create() delivers GetLastError() = 0 have a look at
+        //http://embarcadero.newsgroups.archived.at/public.delphi.rtl/201112/1112065768.html
+        //Error seems to be present at least in XE4
+        //so for the moment it seems to be better to deliver E_ACCESSDENIED for unspecified
+        //stream errors:
+        Result := E_ACCESSDENIED
   else
     Result := inherited SafeCallException(ExceptObject, ExceptAddr);
 end;
+
+constructor TJclSafecallInterfacedObject.Create(OptionalErrorBox: IJclErrorBox = nil);
+begin
+    inherited Create;
+    FErrorBox := OptionalErrorBox;
+end;
+
+function TJclSafecallInterfacedObject.GetErrorBox: IJclErrorBox;
+begin
+    if not Assigned(FErrorBox) then
+      FErrorBox := TIJclErrorBox.Create;
+    Result := FErrorBox;
+end;
+
+
+
 
 //=== { TJclCompressionItem } ================================================
 
@@ -5810,9 +5943,10 @@ end;
 
 //=== { TJclSevenzipOutStream } ==============================================
 
-constructor TJclSevenzipOutStream.Create(AArchive: TJclCompressionArchive; AItemIndex: Integer);
+constructor TJclSevenzipOutStream.Create(AArchive: TJclCompressionArchive; AItemIndex: Integer;
+  AErrorBox: IJclErrorBox = nil);
 begin
-  inherited Create;
+  inherited Create(AErrorBox);
 
   FArchive := AArchive;
   FItemIndex := AItemIndex;
@@ -5822,9 +5956,10 @@ begin
   FTruncateOnRelease := False;
 end;
 
-constructor TJclSevenzipOutStream.Create(AStream: TStream; AOwnsStream: Boolean; ATruncateOnRelease: Boolean);
+constructor TJclSevenzipOutStream.Create(AStream: TStream; AOwnsStream: Boolean; ATruncateOnRelease: Boolean;
+  AErrorBox: IJclErrorBox = nil);
 begin
-  inherited Create;
+  inherited Create(AErrorBox);
 
   FArchive := nil;
   FItemIndex := -1;
@@ -5941,9 +6076,10 @@ end;
 
 //=== { TJclSevenzipInStream } ===============================================
 
-constructor TJclSevenzipInStream.Create(AArchive: TJclCompressionArchive; AItemIndex: Integer);
+constructor TJclSevenzipInStream.Create(AArchive: TJclCompressionArchive; AItemIndex: Integer;
+  AErrorBox: IJclErrorBox = nil);
 begin
-  inherited Create;
+  inherited Create(AErrorBox);
 
   FArchive := AArchive;
   FItemIndex := AItemIndex;
@@ -5951,9 +6087,10 @@ begin
   FOwnsStream := False;
 end;
 
-constructor TJclSevenzipInStream.Create(AStream: TStream; AOwnsStream: Boolean);
+constructor TJclSevenzipInStream.Create(AStream: TStream; AOwnsStream: Boolean;
+  AErrorBox: IJclErrorBox = nil);
 begin
-  inherited Create;
+  inherited Create(AErrorBox);
 
   FArchive := nil;
   FItemIndex := -1;
@@ -6675,9 +6812,12 @@ end;
 
 procedure TJclSevenzipUpdateCallback.GetStream(Index: Cardinal;
   out InStream: ISequentialInStream);
+var
+  Stream: TJclSevenzipInStream;
 begin
   FLastStream := Index;
-  InStream := TJclSevenzipInStream.Create(FArchive, Index);
+  Stream := TJclSevenzipInStream.Create(FArchive, Index, ErrorBox);
+  InStream := Stream;
 end;
 
 procedure TJclSevenzipUpdateCallback.GetUpdateItemInfo(Index: Cardinal; NewData,
@@ -6825,6 +6965,7 @@ var
   OutStream: IOutStream;
   UpdateCallback: IArchiveUpdateCallback;
   SplitStream: TJclDynamicSplitStream;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotCompressing;
 
@@ -6838,7 +6979,15 @@ begin
 
     SetSevenzipArchiveCompressionProperties(Self, OutArchive);
 
-    OutArchive.UpdateItems(OutStream, ItemCount, UpdateCallback);
+    try
+      OutArchive.UpdateItems(OutStream, ItemCount, UpdateCallback);
+    except on E: Exception do
+      begin
+        if Supports(UpdateCallback, IJclErrorBox, ErrHdl) then
+          ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+        raise;
+      end;
+    end;
   finally
     FCompressing := False;
     // release volumes and other finalizations
@@ -7606,7 +7755,7 @@ begin
       kExtract:
         if FArchive.Items[Index].ValidateExtraction(Index) then
         begin
-          OutStream := TJclSevenzipOutStream.Create(FArchive, Index);
+          OutStream := TJclSevenzipOutStream.Create(FArchive, Index, ErrorBox);
           Result := S_OK;
         end
         else
@@ -7726,6 +7875,7 @@ var
   Indices: array of Cardinal;
   NbIndices: Cardinal;
   Index: Integer;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotDecompressing;
 
@@ -7752,7 +7902,16 @@ begin
       Items[Index].Selected := True;
       Indices[Index] := Index;
     end;
-    InArchive.Extract(@Indices[0], NbIndices, 0, AExtractCallback);
+
+    try
+      InArchive.Extract(@Indices[0], NbIndices, 0, AExtractCallback);
+    except on E: Exception do
+      begin
+        if Supports(AExtractCallback, IJclErrorBox, ErrHdl) then
+          ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+        raise;
+      end;
+    end;
 
     CheckOperationSuccess;
   finally
@@ -7773,6 +7932,7 @@ var
   Indices: array of Cardinal;
   NbIndices: Cardinal;
   Index: Integer;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotDecompressing;
 
@@ -7801,8 +7961,17 @@ begin
       Inc(NbIndices);
     end;
 
-    InArchive.Extract(@Indices[0], Length(Indices), 0, AExtractCallback);
+    try
+      InArchive.Extract(@Indices[0], Length(Indices), 0, AExtractCallback);
+    except on E: Exception do
+      begin
+        if Supports(AExtractCallback, IJclErrorBox, ErrHdl) then
+          ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+        raise;
+      end;
+    end;
     CheckOperationSuccess;
+
   finally
     FDestinationDir := '';
     FDecompressing := False;
@@ -9056,6 +9225,7 @@ var
   SplitStream: TJclDynamicSplitStream;
   Index: Integer;
   Volume: TJclCompressionVolume;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotCompressing;
   CheckNotDecompressing;
@@ -9073,20 +9243,26 @@ begin
     ReplaceVolumes := True;
     try
       OutArchive.UpdateItems(OutStream, ItemCount, UpdateCallback);
-    except
-      ReplaceVolumes := False;
-      // release reference to volume streams
-      OutStream := nil;
-      // Modifying the archive failed; reset volumes to their original state
-      for Index := 0 to FVolumes.Count - 1 do
+    except on E: Exception do
       begin
-        Volume := TJclCompressionVolume(FVolumes.Items[Index]);
-        Assert(Volume.OwnsTmpStream); 
-        FreeAndNil(Volume.FTmpStream);
-        FileDelete(Volume.TmpFileName);
-        Volume.FTmpFileName := '';
+          //Extend error message:
+          if Supports(UpdateCallback, IJclErrorBox, ErrHdl) then
+            ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+
+          ReplaceVolumes := False;
+          // release reference to volume streams
+          OutStream := nil;
+          // Modifying the archive failed; reset volumes to their original state
+          for Index := 0 to FVolumes.Count - 1 do
+          begin
+            Volume := TJclCompressionVolume(FVolumes.Items[Index]);
+            Assert(Volume.OwnsTmpStream);
+            FreeAndNil(Volume.FTmpStream);
+            FileDelete(Volume.TmpFileName);
+            Volume.FTmpFileName := '';
+          end;
+          raise
       end;
-      raise
     end;
   finally
     FCompressing := False;
@@ -9127,6 +9303,7 @@ var
   Indices: array of Cardinal;
   NbIndices: Cardinal;
   Index: Integer;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotDecompressing;
   CheckNotCompressing;
@@ -9154,7 +9331,16 @@ begin
       Items[Index].Selected := True;
       Indices[Index] := Index;
     end;
-    InArchive.Extract(@Indices[0], NbIndices, 0, AExtractCallback);
+
+    try
+      InArchive.Extract(@Indices[0], NbIndices, 0, AExtractCallback);
+    except on E: Exception do
+      begin
+        if Supports(AExtractCallback, IJclErrorBox, ErrHdl) then
+          ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+        raise;
+      end;
+    end;
 
     CheckOperationSuccess;
   finally
@@ -9175,6 +9361,7 @@ var
   Indices: array of Cardinal;
   NbIndices: Cardinal;
   Index: Integer;
+  ErrHdl: IJclErrorBox;
 begin
   CheckNotDecompressing;
   CheckNotCompressing;
@@ -9204,7 +9391,16 @@ begin
       Inc(NbIndices);
     end;
 
-    InArchive.Extract(@Indices[0], Length(Indices), 0, AExtractCallback);
+    try
+      InArchive.Extract(@Indices[0], Length(Indices), 0, AExtractCallback);
+    except on E: Exception do
+      begin
+        if Supports(AExtractCallback, IJclErrorBox, ErrHdl) then
+          ErrHdl.ModifyExceptionMsg(E, ShowErrorDetails);
+        raise;
+      end;
+    end;
+
     CheckOperationSuccess;
   finally
     FDestinationDir := '';
@@ -10035,6 +10231,8 @@ class function TJclSwfcUpdateArchive.ArchiveCLSID: TGUID;
 begin
   Result := CLSID_CFormatSwfc;
 end;
+
+
 
 {$ENDIF MSWINDOWS}
 

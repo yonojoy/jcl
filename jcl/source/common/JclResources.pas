@@ -1147,6 +1147,7 @@ resourcestring
   RsCompressionHxsExtensions         = '*.hxs;*.hxi;*.hxr;*.hxq;*.hxw;*.lit';
   RsCompressionDuplicate             = 'The file %s already exists in the archive';
   RsCompressionReplaceError          = 'At least one compression volume could not be replaced after an archive out-of-place update';
+  RsCompressionDetails               = 'Details:';
 
 //=== JclConsole =============================================================
 resourcestring
