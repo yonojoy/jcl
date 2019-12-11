@@ -1054,6 +1054,7 @@ type
     FAddFilesInDir: Boolean;
     FDuplicateAction: TJclCompressionDuplicateAction;
     FDuplicateCheck: TJclCompressionDuplicateCheck;
+    FRejectedFileAttributes: Integer;
     procedure InternalAddFile(const Directory: string; const FileInfo: TSearchRec);
     procedure InternalAddDirectory(const Directory: string);
   protected
@@ -1078,6 +1079,8 @@ type
 
     property DuplicateCheck: TJclCompressionDuplicateCheck read FDuplicateCheck write FDuplicateCheck;
     property DuplicateAction: TJclCompressionDuplicateAction read FDuplicateAction write FDuplicateAction;
+    /// Files with this Attributes are not added via AddDirectory
+    property RejectedFileAttributes: Integer read FRejectedFileAttributes write FRejectedFileAttributes;
   end;
 
   TJclCompressArchiveClass = class of TJclCompressArchive;
@@ -5414,7 +5417,7 @@ begin
   Result := AddFileCheckDuplicate(AItem);
 
   if (DirName <> '') and AddFilesInDir then
-    EnumFiles(PathAddSeparator(DirName) + '*', InternalAddFile, faDirectory);
+    EnumFiles(PathAddSeparator(DirName) + '*', InternalAddFile, faDirectory or FRejectedFileAttributes);
 end;
 
 function TJclCompressArchive.AddFile(const PackedName: WideString;
